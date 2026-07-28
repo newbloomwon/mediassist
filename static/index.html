@@ -283,7 +283,7 @@
     </div>
 
     <script>
-        let patientId = null;
+        let patientName = null;
         let conversationHistory = [];
 
         async function doLogin() {
@@ -294,13 +294,26 @@
             if (!id) return;
 
             try {
-                const resp = await fetch(`/patient/${id}`);
-                if (!resp.ok) {
+                // Step 1: Create a server-side session via POST /login
+                const loginResp = await fetch('/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ patient_id: parseInt(id) })
+                });
+                if (!loginResp.ok) {
                     errorEl.style.display = 'block';
                     return;
                 }
-                const data = await resp.json();
-                patientId = parseInt(id);
+
+                // Step 2: Fetch patient summary (session cookie is now set)
+                const patientResp = await fetch(`/patient/${id}`);
+                if (!patientResp.ok) {
+                    errorEl.style.display = 'block';
+                    return;
+                }
+                const data = await patientResp.json();
+
+                patientName = data.name;
                 document.getElementById('patientNameDisplay').textContent = data.name;
                 document.getElementById('loginScreen').style.display = 'none';
                 document.getElementById('chatScreen').style.display = 'flex';
@@ -312,8 +325,13 @@
             }
         }
 
-        function doLogout() {
-            patientId = null;
+        async function doLogout() {
+            // Clear the server-side session
+            try {
+                await fetch('/logout', { method: 'POST' });
+            } catch (e) {}
+
+            patientName = null;
             conversationHistory = [];
             document.getElementById('chatMessages').innerHTML =
                 '<div class="typing-indicator" id="typingIndicator"><span class="dots"><span>.</span><span>.</span><span>.</span></span> MediAssist is thinking...</div>';
@@ -336,11 +354,11 @@
             scrollToBottom();
 
             try {
+                // patient_id is no longer sent — the server reads it from the session
                 const resp = await fetch('/chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        patient_id: patientId,
                         message: msg,
                         conversation_history: conversationHistory
                     })
@@ -393,13 +411,9 @@
         }
 
         async function resetMemory() {
-            if (!patientId) return;
             try {
-                await fetch('/reset', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ patient_id: patientId })
-                });
+                // patient_id no longer needed — server reads from session
+                await fetch('/reset', { method: 'POST' });
                 addMessage('assistant', 'Session memory has been cleared.', [], null);
             } catch (e) {
                 addMessage('assistant', 'Failed to reset memory.', [], null);

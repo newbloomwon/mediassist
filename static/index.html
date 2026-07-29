@@ -363,6 +363,14 @@
                         conversation_history: conversationHistory
                     })
                 });
+
+                if (!resp.ok) {
+                    // Server returned an error (400 injection blocked, 429 rate limit, etc.)
+                    const err = await resp.json().catch(() => ({}));
+                    addMessage('assistant', err.detail || 'Your message could not be processed. Please rephrase your question.', [], null);
+                    return;
+                }
+
                 const data = await resp.json();
                 conversationHistory.push({ role: 'user', content: msg });
                 conversationHistory.push({ role: 'assistant', content: data.response });

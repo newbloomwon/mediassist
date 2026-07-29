@@ -1,12 +1,21 @@
 """
-security.py — Input validation, session-based authentication, and rate limiting.
+security.py — Input validation, session-based authentication, rate limiting,
+              PII redaction, and response validation.
 
 Drop this file into the root of your mediassist repo.
 """
+import json
+import logging
 import re
 import time
 from collections import defaultdict, deque
 from fastapi import HTTPException, Request
+
+# ── Security logger ───────────────────────────────────────────────────────────
+# Handlers are attached by main.py after it creates the logs/ directory.
+# Using a named logger here means main.py can configure it without importing
+# this module first.
+security_logger = logging.getLogger("mediassist.security")
 
 # ── Input limits ──────────────────────────────────────────────────────────────
 
@@ -135,3 +144,123 @@ def check_rate_limit(patient_id: int) -> None:
         )
 
     timestamps.append(now)
+
+
+# ── PII redaction ─────────────────────────────────────────────────────────────
+#
+# Applied to user messages and response summaries before they are written to
+# any log file.  Never applied to the actual response sent to the user —
+# that would break legitimate medical information.
+
+_PII_PATTERNS = [
+    (re.compile(r'\b\d{3}-\d{2}-\d{4}\b'),                              "[SSN]"),
+    (re.compile(r'\b(BCB|AET|UHC|MED|KAI)-\d{4}-\d{6}\b'),             "[INSURANCE-ID]"),
+    (re.compile(r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b'), "[EMAIL]"),
+    (re.compile(r'\b(\+1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b'), "[PHONE]"),
+]
+
+
+def redact_pii(text: str) -> str:
+    """
+    Replace known PII patterns with labelled placeholders.
+    Safe to call on any string before logging.
+    """
+    if not text:
+        return text
+    for pattern, placeholder in _PII_PATTERNS:
+        text = pattern.sub(placeholder, text)
+    return text
+
+
+def _sec_log(level: str, event: str, patient_id: int, **kwargs) -> None:
+    """Write a structured JSON entry to the security log."""
+    entry = {
+        "event": event,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "patient_id": patient_id,
+        **kwargs,
+    }
+    msg = json.dumps(entry)
+    if level == "error":
+        security_logger.error(msg)
+    else:
+        security_logger.warning(msg)
+
+
+# ── Response validation ───────────────────────────────────────────────────────
+
+MAX_RESPONSE_LENGTH = 5000
+
+_SSN_PATTERN          = re.compile(r'\b\d{3}-\d{2}-\d{4}\b')
+_INSURANCE_ID_PATTERN = re.compile(r'\b(BCB|AET|UHC|MED|KAI)-\d{4}-\d{6}\b')
+_EMAIL_IN_RESP_PATTERN = re.compile(r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b')
+
+_SYSTEM_PROMPT_PHRASES = [
+    "SECURITY RULES",
+    "session patient ID",
+    "END SECURITY RULES",
+    "server-side authenticated",
+]
+
+ALL_PATIENT_NAMES = [
+    "Margaret Chen", "James Okafor", "Sofia Ramirez", "Robert Washington",
+    "Priya Patel", "David Kim", "Amara Johnson", "Carlos Mendez",
+    "Lisa Nakamura", "Thomas O'Brien",
+]
+
+SAFE_FALLBACK = (
+    "I'm sorry, I wasn't able to generate a safe response to that request. "
+    "Please try rephrasing your question."
+)
+
+
+def validate_response(response: str, patient_id: int, patient_name: str) -> str:
+    """
+    Validates the LLM response before it reaches the user.
+
+    Hard blocks — returns SAFE_FALLBACK and logs an error:
+      - Empty response
+      - SSN pattern detected
+      - Insurance ID pattern detected
+      - System prompt phrases detected (prompt disclosure)
+
+    Soft flags — logs a warning, passes response through:
+      - Another patient's name in the response
+      - Email address in the response
+
+    Truncates responses over MAX_RESPONSE_LENGTH characters.
+    """
+    if not response or not response.strip():
+        _sec_log("error", "response_blocked", patient_id, reason="empty response")
+        return SAFE_FALLBACK
+
+    if len(response) > MAX_RESPONSE_LENGTH:
+        _sec_log("warning", "response_truncated", patient_id,
+                 original_length=len(response), limit=MAX_RESPONSE_LENGTH)
+        response = response[:MAX_RESPONSE_LENGTH] + "\n\n[Response truncated]"
+
+    if _SSN_PATTERN.search(response):
+        _sec_log("error", "response_blocked", patient_id, reason="SSN pattern detected")
+        return SAFE_FALLBACK
+
+    if _INSURANCE_ID_PATTERN.search(response):
+        _sec_log("error", "response_blocked", patient_id,
+                 reason="insurance ID pattern detected")
+        return SAFE_FALLBACK
+
+    for phrase in _SYSTEM_PROMPT_PHRASES:
+        if phrase.lower() in response.lower():
+            _sec_log("error", "response_blocked", patient_id,
+                     reason=f"system prompt phrase detected: '{phrase}'")
+            return SAFE_FALLBACK
+
+    for name in ALL_PATIENT_NAMES:
+        if name != patient_name and name.lower() in response.lower():
+            _sec_log("warning", "response_flagged", patient_id,
+                     reason=f"other patient name in response: '{name}'")
+
+    if _EMAIL_IN_RESP_PATTERN.search(response):
+        _sec_log("warning", "response_flagged", patient_id,
+                 reason="email address in response")
+
+    return response

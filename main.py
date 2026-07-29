@@ -13,7 +13,7 @@ from typing import Optional
 
 import database
 from agent import run_agent
-from security import validate_message, require_auth, check_rate_limit
+from security import validate_message, require_auth, check_rate_limit, redact_pii
 
 app = FastAPI(title="MediAssist")
 
@@ -39,11 +39,22 @@ app.add_middleware(
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
 os.makedirs("logs", exist_ok=True)
-log_handler = logging.FileHandler("logs/requests.log")
-log_handler.setFormatter(logging.Formatter("%(message)s"))
-request_logger = logging.getLogger("mediassist.requests")
-request_logger.addHandler(log_handler)
-request_logger.setLevel(logging.INFO)
+
+_json_fmt = logging.Formatter("%(message)s")
+
+# access.log — one structured JSON line per chat request, no PHI
+_access_handler = logging.FileHandler("logs/access.log")
+_access_handler.setFormatter(_json_fmt)
+access_logger = logging.getLogger("mediassist.access")
+access_logger.addHandler(_access_handler)
+access_logger.setLevel(logging.INFO)
+
+# security.log — security events from security.py (blocks, flags, rate limits)
+_security_handler = logging.FileHandler("logs/security.log")
+_security_handler.setFormatter(_json_fmt)
+_sec_logger = logging.getLogger("mediassist.security")
+_sec_logger.addHandler(_security_handler)
+_sec_logger.setLevel(logging.INFO)
 
 
 # ── Request models ────────────────────────────────────────────────────────────
@@ -141,18 +152,22 @@ def chat(req: ChatRequest, request: Request):
 
     duration_ms = int((time.time() - start_time) * 1000)
 
+    # Structured access log — PII redacted, tool outputs stripped
     log_entry = {
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+        "event": "chat_request",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "request_id": request_id,
         "patient_id": patient_id,
-        "user_message": validated_message,
-        "tool_calls": tool_calls,
-        "response_summary": response_text[:100],
-        "response_length_chars": len(response_text),
-        "tool_call_count": len(tool_calls),
+        "message_length": len(validated_message),
+        "message_preview": redact_pii(validated_message[:80]),
+        "tools_used": [tc["tool_name"] for tc in tool_calls],
+        "tool_count": len(tool_calls),
+        "response_length": len(response_text),
+        "response_preview": redact_pii(response_text[:80]),
         "duration_ms": duration_ms,
+        "status": "ok",
     }
-    request_logger.info(json.dumps(log_entry))
+    access_logger.info(json.dumps(log_entry))
 
     return {
         "response": response_text,

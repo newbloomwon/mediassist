@@ -3,6 +3,7 @@ import json
 from openai import OpenAI
 import database
 from config import OPENROUTER_API_KEY
+from security import validate_response
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
@@ -246,6 +247,11 @@ def execute_tool(tool_name, tool_input, patient_id):
 
 
 def run_agent(patient_id, user_message, conversation_history):
+    # Look up patient name once — used by validate_response to detect
+    # cross-patient name leakage in the model's output
+    patient_info = database.get_patient_summary(patient_id)
+    patient_name = patient_info["name"] if patient_info else ""
+
     system_prompt = build_system_prompt(patient_id)
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -266,7 +272,9 @@ def run_agent(patient_id, user_message, conversation_history):
         message = choice.message
 
         if not message.tool_calls:
-            return message.content or "I'm sorry, I couldn't generate a response.", tool_calls_made
+            raw = message.content or "I'm sorry, I couldn't generate a response."
+            safe = validate_response(raw, patient_id, patient_name)
+            return safe, tool_calls_made
 
         # Append assistant message with tool calls
         messages.append(message)
@@ -292,4 +300,5 @@ def run_agent(patient_id, user_message, conversation_history):
                 "content": result,
             })
 
-    return "I've reached the maximum number of steps for this request. Please try again with a simpler query.", tool_calls_made
+    raw = "I've reached the maximum number of steps for this request. Please try again with a simpler query."
+    return validate_response(raw, patient_id, patient_name), tool_calls_made

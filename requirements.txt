@@ -3,3 +3,4 @@ fastapi
 uvicorn
 python-dotenv
 itsdangerous>=2.1.0
+itsdangerous>=2.1.0

@@ -1,9 +1,11 @@
 """
-security.py — Input validation and session-based authentication helpers.
+security.py — Input validation, session-based authentication, and rate limiting.
 
 Drop this file into the root of your mediassist repo.
 """
 import re
+import time
+from collections import defaultdict, deque
 from fastapi import HTTPException, Request
 
 # ── Input limits ──────────────────────────────────────────────────────────────
@@ -92,3 +94,44 @@ def require_auth(request: Request) -> int:
             detail="Not authenticated. Please log in first.",
         )
     return int(patient_id)
+
+
+# ── Rate limiting ─────────────────────────────────────────────────────────────
+#
+# Simple in-memory sliding-window rate limiter.
+# Limits each patient session to RATE_LIMIT_REQUESTS chat messages per
+# RATE_LIMIT_WINDOW seconds.  Resets automatically as the window slides.
+#
+# Note: because this is in-memory, limits reset if the server restarts.
+# For a production system, use Redis or a similar shared store.
+
+RATE_LIMIT_REQUESTS = 20   # max messages per window
+RATE_LIMIT_WINDOW   = 60   # window size in seconds
+
+_request_log: dict = defaultdict(deque)  # patient_id → deque of timestamps
+
+
+def check_rate_limit(patient_id: int) -> None:
+    """
+    Enforces the per-patient rate limit.
+    Raises HTTP 429 if the patient has exceeded RATE_LIMIT_REQUESTS in the
+    last RATE_LIMIT_WINDOW seconds.
+    """
+    now = time.time()
+    window_start = now - RATE_LIMIT_WINDOW
+    timestamps = _request_log[patient_id]
+
+    # Drop timestamps that have fallen outside the window
+    while timestamps and timestamps[0] < window_start:
+        timestamps.popleft()
+
+    if len(timestamps) >= RATE_LIMIT_REQUESTS:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Too many messages. You can send up to {RATE_LIMIT_REQUESTS} "
+                f"messages per minute. Please wait a moment and try again."
+            ),
+        )
+
+    timestamps.append(now)

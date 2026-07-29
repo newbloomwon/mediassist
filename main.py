@@ -13,7 +13,7 @@ from typing import Optional
 
 import database
 from agent import run_agent
-from security import validate_message, require_auth
+from security import validate_message, require_auth, check_rate_limit
 
 app = FastAPI(title="MediAssist")
 
@@ -123,6 +123,9 @@ def chat(req: ChatRequest, request: Request):
     """
     # Authenticate — raises 401 if no valid session
     patient_id = require_auth(request)
+
+    # Rate limit — raises 429 if the patient is sending too fast
+    check_rate_limit(patient_id)
 
     # Validate and sanitise the incoming message
     validated_message = validate_message(req.message)

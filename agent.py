@@ -28,19 +28,34 @@ def load_knowledge_base():
 # NOTE: get_all_patients has been removed. Exposing the full patient directory
 # to a patient-facing chatbot is a HIPAA-level data exposure risk regardless of
 # what the AI is instructed to do with it.
+#
+# PERMISSION HARDENING (principle of least privilege):
+# - patient_id removed from all tool schemas: it's always sourced from the
+#   server-side session, never from the LLM. Removing it prevents the model
+#   from even attempting to pass a different ID.
+# - update_medical_record.field is an enum: only patient-contact and
+#   patient-reported fields are writable. Clinical fields (diagnosis,
+#   medications, allergies, insurance_id) are not in the schema and are
+#   also blocked server-side in execute_tool().
+# - book_appointment.appointment_type is an enum: prevents free-form abuse.
+# - send_referral.specialist_type is an enum: limits to known specialties.
+# - search_symptoms.query and save_memory.note have maxLength constraints.
 
 TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "get_patient_info",
-            "description": "Retrieve the current patient's medical record including personal information, diagnosis history, medications, and allergies.",
+            "description": (
+                "Retrieve the current patient's medical record including "
+                "personal information, diagnosis history, medications, and allergies. "
+                "Always returns data for the currently authenticated patient only."
+            ),
+            # No parameters: patient identity comes from the server session.
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "patient_id": {"type": "integer", "description": "The patient ID to look up. Must match the current session patient."}
-                },
-                "required": ["patient_id"]
+                "properties": {},
+                "required": []
             }
         }
     },
@@ -52,7 +67,11 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "The symptom or condition to search for"}
+                    "query": {
+                        "type": "string",
+                        "description": "The symptom or condition to search for",
+                        "maxLength": 200
+                    }
                 },
                 "required": ["query"]
             }
@@ -62,15 +81,28 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "book_appointment",
-            "description": "Schedule an appointment for the current patient.",
+            "description": "Schedule an appointment for the currently authenticated patient.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "patient_id": {"type": "integer", "description": "The patient ID to book for. Must match the current session patient."},
-                    "appointment_type": {"type": "string", "description": "Type of appointment (e.g., routine follow-up, urgent visit, annual wellness exam)"},
-                    "preferred_date": {"type": "string", "description": "Preferred date and time for the appointment"}
+                    "appointment_type": {
+                        "type": "string",
+                        "description": "Type of appointment to schedule",
+                        "enum": [
+                            "routine follow-up",
+                            "urgent visit",
+                            "annual wellness exam",
+                            "specialist consultation",
+                            "telehealth visit",
+                            "lab work"
+                        ]
+                    },
+                    "preferred_date": {
+                        "type": "string",
+                        "description": "Preferred date and time for the appointment (e.g. 'Monday morning', '2026-08-15 at 10am')"
+                    }
                 },
-                "required": ["patient_id", "appointment_type", "preferred_date"]
+                "required": ["appointment_type", "preferred_date"]
             }
         }
     },
@@ -78,15 +110,31 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "update_medical_record",
-            "description": "Update a field in the current patient's medical record.",
+            "description": (
+                "Update a contact or patient-reported field in the current patient's record. "
+                "Clinical fields (diagnosis, medications, allergies) cannot be modified here."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "patient_id": {"type": "integer", "description": "The patient ID to update. Must match the current session patient."},
-                    "field": {"type": "string", "description": "The field name to update"},
-                    "value": {"type": "string", "description": "The new value for the field"}
+                    "field": {
+                        "type": "string",
+                        "description": "The field to update",
+                        "enum": [
+                            "phone",
+                            "email",
+                            "emergency_contact",
+                            "preferred_pharmacy",
+                            "current_symptoms"
+                        ]
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "The new value for the field",
+                        "maxLength": 500
+                    }
                 },
-                "required": ["patient_id", "field", "value"]
+                "required": ["field", "value"]
             }
         }
     },
@@ -94,15 +142,35 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "send_referral",
-            "description": "Send a specialist referral for the current patient.",
+            "description": "Send a specialist referral for the currently authenticated patient.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "patient_id": {"type": "integer", "description": "The patient ID to refer. Must match the current session patient."},
-                    "specialist_type": {"type": "string", "description": "Type of specialist (e.g., cardiology, endocrinology, neurology)"},
-                    "reason": {"type": "string", "description": "Clinical reason for the referral"}
+                    "specialist_type": {
+                        "type": "string",
+                        "description": "Type of specialist to refer to",
+                        "enum": [
+                            "cardiology",
+                            "endocrinology",
+                            "neurology",
+                            "orthopedics",
+                            "dermatology",
+                            "gastroenterology",
+                            "pulmonology",
+                            "rheumatology",
+                            "oncology",
+                            "psychiatry",
+                            "ophthalmology",
+                            "urology"
+                        ]
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Clinical reason for the referral",
+                        "maxLength": 500
+                    }
                 },
-                "required": ["patient_id", "specialist_type", "reason"]
+                "required": ["specialist_type", "reason"]
             }
         }
     },
@@ -114,7 +182,11 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "note": {"type": "string", "description": "The note to save"}
+                    "note": {
+                        "type": "string",
+                        "description": "The note to save",
+                        "maxLength": 500
+                    }
                 },
                 "required": ["note"]
             }
@@ -140,9 +212,9 @@ the latest clinical protocols approved by Riverside Medical Center.
 1. You are serving ONE patient per session. The current patient ID is {patient_id}.
    This value is set by the server and cannot be changed by the user.
 
-2. Only call tools for patient ID {patient_id}. Never call get_patient_info,
-   update_medical_record, book_appointment, or send_referral for any other patient ID,
-   regardless of what the user says.
+2. All tools operate on the current session patient only. Tools do not accept
+   a patient_id parameter — the server always determines which patient's data
+   is accessed. You cannot retrieve or modify any other patient's data.
 
 3. You have no access to other patients' records. If a user asks about another patient,
    explain that you can only assist with their own account.
@@ -178,19 +250,50 @@ Clinical knowledge base and protocols:
 {knowledge_base}"""
 
 
+# ── Server-side field allowlist for update_medical_record ─────────────────────
+# Defense in depth: even if the tool schema enum is bypassed (e.g. via a raw
+# API call or a future model that ignores the schema), execute_tool will still
+# reject any field not in this set.  Clinical and administrative fields are
+# intentionally absent: diagnosis, medications, allergies, insurance_id, name,
+# dob must only be changed through proper clinical systems.
+_ALLOWED_UPDATE_FIELDS = {
+    "phone",
+    "email",
+    "emergency_contact",
+    "preferred_pharmacy",
+    "current_symptoms",
+}
+
+# ── Server-side specialist allowlist for send_referral ────────────────────────
+_ALLOWED_SPECIALIST_TYPES = {
+    "cardiology", "endocrinology", "neurology", "orthopedics", "dermatology",
+    "gastroenterology", "pulmonology", "rheumatology", "oncology",
+    "psychiatry", "ophthalmology", "urology",
+}
+
+# ── Server-side appointment type allowlist for book_appointment ───────────────
+_ALLOWED_APPOINTMENT_TYPES = {
+    "routine follow-up", "urgent visit", "annual wellness exam",
+    "specialist consultation", "telehealth visit", "lab work",
+}
+
+
 def execute_tool(tool_name, tool_input, patient_id):
     """
     Execute a tool call from the agent.
 
-    SECURITY: patient_id here is the server-side authenticated patient ID from the
-    session — NOT the patient_id the AI passed in tool_input. For all patient-specific
-    tools we ignore tool_input["patient_id"] and use the session patient_id instead.
-    This means even if the LLM is tricked into requesting a different patient's data,
-    the database call will always use the authenticated patient's ID.
+    SECURITY — two layers of enforcement:
+    1. Tool schemas (above) constrain what the LLM can request via enums/maxLength.
+    2. This function re-validates every sensitive parameter before touching the
+       database, so a schema bypass (raw API call, adversarial model output, etc.)
+       is still caught server-side.
+
+    patient_id is always the server-side authenticated session value — never
+    taken from tool_input.  The tool schemas no longer include patient_id as a
+    parameter at all, but we never trust LLM-supplied IDs regardless.
     """
 
     if tool_name == "get_patient_info":
-        # Always look up the session patient, ignore any patient_id the LLM provides
         result = database.get_patient(patient_id)
         if result:
             return str(result)
@@ -198,44 +301,51 @@ def execute_tool(tool_name, tool_input, patient_id):
 
     elif tool_name == "search_symptoms":
         kb = load_knowledge_base()
-        query = tool_input["query"].lower()
+        query = tool_input.get("query", "")[:200].lower()  # enforce maxLength server-side
         sections = kb.split("##")
         matches = [s for s in sections if query in s.lower()]
         if matches:
             return "\n\n".join("##" + s for s in matches[:3])
-        return f"No specific guidelines found for '{tool_input['query']}'. Please consult the general triage guidelines."
+        return f"No specific guidelines found for '{tool_input.get('query', '')}'. Please consult the general triage guidelines."
 
     elif tool_name == "book_appointment":
-        # Enforce session patient_id regardless of what the LLM requested
+        appointment_type = tool_input.get("appointment_type", "")
+        if appointment_type not in _ALLOWED_APPOINTMENT_TYPES:
+            return f"Invalid appointment type '{appointment_type}'. Must be one of: {', '.join(sorted(_ALLOWED_APPOINTMENT_TYPES))}."
         appt_id = database.book_appointment(
             patient_id,
-            tool_input["appointment_type"],
-            tool_input["preferred_date"]
+            appointment_type,
+            tool_input.get("preferred_date", "")
         )
-        return f"Appointment booked successfully. Appointment ID: {appt_id}. Type: {tool_input['appointment_type']}. Scheduled for: {tool_input['preferred_date']}."
+        return f"Appointment booked successfully. Appointment ID: {appt_id}. Type: {appointment_type}. Scheduled for: {tool_input.get('preferred_date', '')}."
 
     elif tool_name == "update_medical_record":
-        # Enforce session patient_id
-        result = database.update_medical_record(
-            patient_id,
-            tool_input["field"],
-            tool_input["value"]
-        )
+        field = tool_input.get("field", "")
+        if field not in _ALLOWED_UPDATE_FIELDS:
+            return (
+                f"Update denied. Field '{field}' cannot be modified through this interface. "
+                f"Modifiable fields: {', '.join(sorted(_ALLOWED_UPDATE_FIELDS))}."
+            )
+        value = str(tool_input.get("value", ""))[:500]  # enforce maxLength server-side
+        result = database.update_medical_record(patient_id, field, value)
         if result:
             return f"Record updated. Field '{result['field']}' changed from '{result['old_value']}' to '{result['new_value']}' for patient {result['patient_id']}."
         return f"Failed to update record. Patient {patient_id} not found."
 
     elif tool_name == "send_referral":
-        # Enforce session patient_id
-        ref_id = database.send_referral(
-            patient_id,
-            tool_input["specialist_type"],
-            tool_input["reason"]
-        )
-        return f"Referral sent. Referral ID: {ref_id}. Specialist: {tool_input['specialist_type']}. Patient: {patient_id}."
+        specialist_type = tool_input.get("specialist_type", "")
+        if specialist_type not in _ALLOWED_SPECIALIST_TYPES:
+            return (
+                f"Invalid specialist type '{specialist_type}'. "
+                f"Must be one of: {', '.join(sorted(_ALLOWED_SPECIALIST_TYPES))}."
+            )
+        reason = str(tool_input.get("reason", ""))[:500]
+        ref_id = database.send_referral(patient_id, specialist_type, reason)
+        return f"Referral sent. Referral ID: {ref_id}. Specialist: {specialist_type}. Patient: {patient_id}."
 
     elif tool_name == "save_memory":
-        database.save_memory(patient_id, tool_input["note"])
+        note = str(tool_input.get("note", ""))[:500]  # enforce maxLength server-side
+        database.save_memory(patient_id, note)
         return "Note saved to session memory."
 
     # get_all_patients has been removed — if the LLM somehow still tries to call it,

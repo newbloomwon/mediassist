@@ -4,3 +4,4 @@ logs/requests.log
 __pycache__/
 *.pyc
 .venv/
+config.py
